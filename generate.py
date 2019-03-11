@@ -4,6 +4,9 @@ from datetime import datetime
 import csv
 from io import StringIO
 import os 
+import sys
+import math
+import numpy as np
 
 def str_to_date(s):
     try:
@@ -43,8 +46,8 @@ parser.add_argument('--skip_commits', '-sm', metavar="<Commit Message>", type=st
                     help='Skip entries that have this message in the commit. Default: %(default)s', default=None)
 parser.add_argument('--estimate-start-time', metavar="<HH:MM>", type=str_to_time,
 					help='What time of the day you start working for estimating the time it took to create a commit. Default: %(default)s', default='09:00')
-parser.add_argument('--estimate-fallback', metavar="<hours>", type=float,
-					help='Default number of hours per commit if the program cannot estimate one. Default: %(default)s', default=1)
+parser.add_argument('--hour-increment', '-hi', metavar="<hours>", type=float,
+					help='Round to this nearest hour increment. Default: %(default)s', default=0.1)
 parser.add_argument('--verbose', '-v', action='store_true',
 					help='Verbose', default=False)
 
@@ -61,15 +64,16 @@ if __name__== "__main__":
 
 	use_file = os.path.isfile(args.repo)
 
-	if args.verbose:
-		if not use_file:
+	if not use_file:
+		if args.verbose:
 			print("Running git log " + " ".join(params))
-			result = subprocess.run(['git', 'log', *params], cwd=args.repo, stdout=subprocess.PIPE)
-			scsv = result.stdout.decode("utf-8")
-			f = StringIO(scsv)
-		else:
+		result = subprocess.run(['git', 'log', *params], cwd=args.repo, stdout=subprocess.PIPE)
+		scsv = result.stdout.decode("utf-8")
+		f = StringIO(scsv)
+	else:
+		if args.verbose:
 			print("Reading from file: %s" % args.repo)
-			f = open(args.repo, "r")
+		f = open(args.repo, "r")
 
 	rows = []
 	seconds = []
@@ -92,6 +96,7 @@ if __name__== "__main__":
 			date = datetime.strptime(date, '%a %b %d %H:%M:%S %Y %z')
 			last_row_date = date
 
+
 			if last_date != None:
 				if same_day(date, last_date):
 					seconds.append((last_date - date).seconds)
@@ -102,10 +107,8 @@ if __name__== "__main__":
 					if last_date >= est:
 						seconds.append(secs)
 					else:
-						if args.verbose:
-							print("Commit (%s) happened before estimated start time (%s), using fallback of %s" % (last_date, est, args.estimate_fallback))
-						seconds.append(args.estimate_fallback * 60 * 60)
-					last_date = None
+						seconds.append((est - last_date).seconds)
+					last_date = date
 			else:
 				last_date = date
 
@@ -115,11 +118,27 @@ if __name__== "__main__":
 		if last_row_date >= est:
 			seconds.append(secs)
 		else:
-			if args.verbose:
-				print("Commit (%s) happened before estimated start time (%s), using fallback of %s" % (last_row_date, est, args.estimate_fallback))
-			seconds.append(args.estimate_fallback * 60 * 60)
+			seconds.append((est - last_row_date).seconds)
 
-	hours = list(map(lambda s: float(s) / 3600.0, seconds))
+
+	if len(rows) != len(seconds):
+		print("Assertion failed, rows length does not equal seconds length (%s - %s)" % (len(rows), len(seconds)))
+		sys.exit(1)
+
+	# Some filtering
+	mean = np.mean(seconds)
+	std = np.std(seconds)
+	median = np.median(seconds)
+
+	for i in range(0, len(seconds)):
+		if seconds[i] > 2*std + mean:
+			seconds[i] = median + (std / seconds[i])
+
+	def seconds_to_hours(s):
+		hours = float(s) / 3600.0
+		return round(math.ceil(hours / args.hour_increment)*args.hour_increment, 2)
+
+	hours = list(map(seconds_to_hours, seconds))
 	results = list(zip(rows, hours))
 
 	with open(args.output, 'w') as csvfile:
